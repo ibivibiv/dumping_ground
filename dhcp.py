@@ -166,9 +166,9 @@ class DHCPD:
                                                mac, config.CONTEXT)
             ip_parts = str(ips[0]).split("/")
 
-            ip = ip.replace("['", "")
-
             ip = ip_parts[0]
+
+            ip = ip.replace("['")
 
         except :
             pass
@@ -247,15 +247,20 @@ class DHCPD:
             response += struct.pack('!HHI', 0, 0, 0) # secs, flags, ciaddr
         else:
             response += struct.pack('!HHI', 0, 0x8000, 0)
-
-        offer = self.get_namespaced_static('dhcp.binding.{0}.ipaddr'.format(self.get_mac(client_mac)))
-        offer = offer if offer else self.next_ip()
-        self.leases[client_mac]['ip'] = offer
-        self.leases[client_mac]['expire'] = time() + 86400
-        print(self.leases[client_mac]['ip'])
-        print(self.leases[client_mac]['expire'])
-        self.logger.info('New Assignment - MAC: {0} -> IP: {1}'.format(self.get_mac(client_mac), self.leases[client_mac]['ip']))
-        response += socket.inet_aton(offer) # yiaddr
+        if not self.mode_proxy:
+            if self.leases[client_mac]['ip'] and self.leases[client_mac]['expire'] > time(): # OFFER
+                offer = self.leases[client_mac]['ip']
+            else: # ACK
+                offer = self.get_namespaced_static('dhcp.binding.{0}.ipaddr'.format(self.get_mac(client_mac)))
+                offer = offer if offer else self.next_ip()
+                self.leases[client_mac]['ip'] = offer
+                self.leases[client_mac]['expire'] = time() + 86400
+                print(self.leases[client_mac]['ip'])
+                print(self.leases[client_mac]['expire'])
+                self.logger.info('New Assignment - MAC: {0} -> IP: {1}'.format(self.get_mac(client_mac), self.leases[client_mac]['ip']))
+            response += socket.inet_aton(offer) # yiaddr
+        else:
+            response += socket.inet_aton('0.0.0.0')
         response += socket.inet_aton(self.file_server) # siaddr
         response += socket.inet_aton('0.0.0.0') # giaddr
         response += chaddr # chaddr
@@ -383,4 +388,14 @@ class DHCPD:
             if not self.validate_req(client_mac):
                 continue
             type = ord(self.options[client_mac][53][0]) # see RFC2131, page 10
-            self.dhcp_offer(message)
+            if type == TYPE_53_DHCPDISCOVER:
+                self.logger.debug('Sending DHCPOFFER to {0}'.format(self.get_mac(client_mac)))
+                try:
+                    self.dhcp_offer(message)
+                except NoLeasesError:
+                    self.logger.critical('Ran out of leases')
+            elif type == TYPE_53_DHCPREQUEST:
+                self.logger.debug('Sending DHCPACK to {0}'.format(self.get_mac(client_mac)))
+                self.dhcp_ack(message)
+            else:
+                self.logger.debug('Unhandled DHCP message type {0} from {1}'.format(type, self.get_mac(client_mac)))
